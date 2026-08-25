@@ -1,0 +1,11 @@
+{
+  "domain": "xyz12.site",
+  "serverPort": 3000,
+  "projectPortStart": 31000,
+  "projectPortEnd": 31999,
+  "projectsDirectory": "projects",
+  "logsDirectory": "logs",
+  "dashboardDirectory": "dashboard",
+  "autoBuild": true,
+  "healthCheckTimeoutMs": 15000
+}
