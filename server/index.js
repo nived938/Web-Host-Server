@@ -8,26 +8,129 @@ import httpProxy from "http-proxy";
 import { listProjects,getProject,getProjectByName,getEnv,setEnv,removeEnv,deleteProject,updateProject,nextPort } from "./database.js";
 import { deployProject } from "./deployer.js";
 import { stopProject,restartProject,isRunning } from "./process-manager.js";
-const __filename=fileURLToPath(import.meta.url);const __dirname=path.dirname(__filename);const ROOT=path.resolve(__dirname,"..");
-const config=JSON.parse(fs.readFileSync(path.join(ROOT,"config","config.json"),"utf8"));const projectsDir=path.resolve(ROOT,config.projectsDirectory);const logsDir=path.resolve(ROOT,config.logsDirectory);fs.mkdirSync(projectsDir,{recursive:true});fs.mkdirSync(logsDir,{recursive:true});
-const app=express();app.use(cors());const dashboardToken=process.env.PLAYORG_ADMIN_TOKEN||"";
-function auth(req,res,next){if(!dashboardToken)return next();const supplied=req.get("x-playorg-token")||req.query.token||"";const a=Buffer.from(supplied),b=Buffer.from(dashboardToken);if(a.length!==b.length||!timingSafeEqual(a,b))return res.status(401).json({success:false,error:"Unauthorized"});next();}
+
+const __filename=fileURLToPath(import.meta.url);
+const __dirname=path.dirname(__filename);
+const ROOT=path.resolve(__dirname,"..");
+const config=JSON.parse(fs.readFileSync(path.join(ROOT,"config","config.json"),"utf8"));
+const projectsDir=path.resolve(ROOT,config.projectsDirectory);
+const logsDir=path.resolve(ROOT,config.logsDirectory);
+fs.mkdirSync(projectsDir,{recursive:true});
+fs.mkdirSync(logsDir,{recursive:true});
+
+const app=express();
+app.use(cors());
+const dashboardToken=process.env.PLAYORG_ADMIN_TOKEN||"";
+
+function auth(req,res,next){
+  if(!dashboardToken)return next();
+  const supplied=req.get("x-playorg-token")||req.query.token||"";
+  const a=Buffer.from(supplied),b=Buffer.from(dashboardToken);
+  if(a.length!==b.length||!timingSafeEqual(a,b))return res.status(401).json({success:false,error:"Unauthorized"});
+  next();
+}
+
+function projectFromParam(value){
+  if(/^\d+$/.test(String(value)))return getProject(Number(value));
+  return getProjectByName(String(value));
+}
+
 app.use("/api",express.json({limit:"2mb"}));
 app.get("/api/health",(req,res)=>res.json({status:"online",platform:"PlayOrg",domain:config.domain,serverPort:config.serverPort,projects:listProjects().length}));
 app.get("/api/projects",auth,(req,res)=>res.json({success:true,projects:listProjects().map(p=>({...p,running:isRunning(p.id)}))}));
-app.get("/api/projects/:name",auth,(req,res)=>{const p=getProjectByName(req.params.name);if(!p)return res.status(404).json({success:false,error:"Project not found"});res.json({success:true,project:p,running:isRunning(p.id)});});
-app.post("/api/projects/deploy",auth,async(req,res)=>{try{const project=await deployProject(req.body,config);res.status(201).json({success:true,project});}catch(e){console.error(e);res.status(400).json({success:false,error:e.message});}});
-app.put("/api/projects/:id/settings",auth,(req,res)=>{const p=getProject(req.params.id);if(!p)return res.status(404).json({success:false,error:"Project not found"});try{const {branch,rootDirectory,buildCommand,startCommand,autoDeploy}=req.body||{};const updated=updateProject(p.id,{branch,rootDirectory,buildCommand,startCommand,autoDeploy});res.json({success:true,project:updated});}catch(e){res.status(400).json({success:false,error:e.message});}});
-app.post("/api/projects/:id/restart",auth,(req,res)=>{try{const p=getProject(req.params.id);if(!p)return res.status(404).json({error:"Project not found"});const env=Object.fromEntries(getEnv(p.id).map(x=>[x.variable_name,x.variable_value]));env.PORT=String(p.port);env.NODE_ENV=env.NODE_ENV||"production";const pid=restartProject({...p,logPath:path.join(logsDir,`${p.name}.log`)},env);updateProject(p.id,{status:"running",processId:pid});res.json({success:true,project:getProject(p.id)});}catch(e){res.status(500).json({success:false,error:e.message});}});
-app.post("/api/projects/:id/stop",auth,(req,res)=>{const p=getProject(req.params.id);if(!p)return res.status(404).json({error:"Project not found"});stopProject(p.id);updateProject(p.id,{status:"stopped",processId:null});res.json({success:true,project:getProject(p.id)});});
-app.delete("/api/projects/:id",auth,(req,res)=>{const p=getProject(req.params.id);if(!p)return res.status(404).json({error:"Project not found"});stopProject(p.id);deleteProject(p.id);try{fs.rmSync(path.resolve(p.project_path.split(path.sep).slice(0,-1).join(path.sep)),{recursive:true,force:true});}catch{}res.json({success:true});});
-app.get("/api/projects/:id/env",auth,(req,res)=>{const p=getProject(req.params.id);if(!p)return res.status(404).json({error:"Project not found"});res.json({success:true,variables:getEnv(p.id).map(x=>({name:x.variable_name,value:x.is_secret?"••••••••":x.variable_value,isSecret:!!x.is_secret}))});});
-app.put("/api/projects/:id/env",auth,(req,res)=>{const p=getProject(req.params.id);if(!p)return res.status(404).json({error:"Project not found"});const {name,value,isSecret}=req.body||{};if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(name||"")))return res.status(400).json({error:"Invalid environment variable name"});setEnv(p.id,String(name),String(value??""),isSecret!==false);res.json({success:true});});
-app.delete("/api/projects/:id/env/:name",auth,(req,res)=>{const p=getProject(req.params.id);if(!p)return res.status(404).json({error:"Project not found"});res.json({success:removeEnv(p.id,req.params.name)});});
-app.get("/api/projects/:id/logs",auth,(req,res)=>{const p=getProject(req.params.id);if(!p)return res.status(404).json({error:"Project not found"});const file=path.join(logsDir,`${p.name}.log`);res.type("text").send(fs.existsSync(file)?fs.readFileSync(file,"utf8"):"");});
+app.get("/api/projects/:id",auth,(req,res)=>{
+  const p=projectFromParam(req.params.id);
+  if(!p)return res.status(404).json({success:false,error:"Project not found"});
+  res.json({success:true,project:p,running:isRunning(p.id)});
+});
+app.post("/api/projects/deploy",auth,async(req,res)=>{
+  try{const project=await deployProject(req.body,config);res.status(201).json({success:true,project});}
+  catch(e){console.error(e);res.status(400).json({success:false,error:e.message});}
+});
+app.put("/api/projects/:id/settings",auth,(req,res)=>{
+  const p=projectFromParam(req.params.id);
+  if(!p)return res.status(404).json({success:false,error:"Project not found"});
+  try{
+    const {branch,rootDirectory,buildCommand,startCommand,autoDeploy}=req.body||{};
+    const updated=updateProject(p.id,{branch,rootDirectory,buildCommand,startCommand,autoDeploy});
+    res.json({success:true,project:updated});
+  }catch(e){res.status(400).json({success:false,error:e.message});}
+});
+app.post("/api/projects/:id/restart",auth,(req,res)=>{
+  try{
+    const p=projectFromParam(req.params.id);
+    if(!p)return res.status(404).json({error:"Project not found"});
+    const env=Object.fromEntries(getEnv(p.id).map(x=>[x.variable_name,x.variable_value]));
+    env.PORT=String(p.port);env.NODE_ENV=env.NODE_ENV||"production";
+    const pid=restartProject({...p,logPath:path.join(logsDir,`${p.name}.log`)},env);
+    updateProject(p.id,{status:"running",processId:pid});
+    res.json({success:true,project:getProject(p.id)});
+  }catch(e){res.status(500).json({success:false,error:e.message});}
+});
+app.post("/api/projects/:id/stop",auth,(req,res)=>{
+  const p=projectFromParam(req.params.id);
+  if(!p)return res.status(404).json({error:"Project not found"});
+  stopProject(p.id);updateProject(p.id,{status:"stopped",processId:null});
+  res.json({success:true,project:getProject(p.id)});
+});
+app.delete("/api/projects/:id",auth,(req,res)=>{
+  const p=projectFromParam(req.params.id);
+  if(!p)return res.status(404).json({error:"Project not found"});
+  stopProject(p.id);deleteProject(p.id);
+  try{fs.rmSync(path.resolve(p.project_path.split(path.sep).slice(0,-1).join(path.sep)),{recursive:true,force:true});}catch{}
+  res.json({success:true});
+});
+app.get("/api/projects/:id/env",auth,(req,res)=>{
+  const p=projectFromParam(req.params.id);
+  if(!p)return res.status(404).json({error:"Project not found"});
+  res.json({success:true,variables:getEnv(p.id).map(x=>({name:x.variable_name,value:x.is_secret?"••••••••":x.variable_value,isSecret:!!x.is_secret}))});
+});
+app.put("/api/projects/:id/env",auth,(req,res)=>{
+  const p=projectFromParam(req.params.id);
+  if(!p)return res.status(404).json({error:"Project not found"});
+  const {name,value,isSecret}=req.body||{};
+  if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(name||"")))return res.status(400).json({error:"Invalid environment variable name"});
+  setEnv(p.id,String(name),String(value??""),isSecret!==false);
+  res.json({success:true});
+});
+app.delete("/api/projects/:id/env/:name",auth,(req,res)=>{
+  const p=projectFromParam(req.params.id);
+  if(!p)return res.status(404).json({error:"Project not found"});
+  res.json({success:removeEnv(p.id,req.params.name)});
+});
+app.get("/api/projects/:id/logs",auth,(req,res)=>{
+  const p=projectFromParam(req.params.id);
+  if(!p)return res.status(404).json({error:"Project not found"});
+  const file=path.join(logsDir,`${p.name}.log`);
+  res.type("text").send(fs.existsSync(file)?fs.readFileSync(file,"utf8"):"");
+});
 app.get("/api/ports/next",auth,(req,res)=>res.json({port:nextPort(config.projectPortStart,config.projectPortEnd)}));
-const proxy=httpProxy.createProxyServer({changeOrigin:true});proxy.on("error",(err,req,res)=>{if(!res.headersSent)res.status(502).send(`PlayOrg proxy error: ${err.message}`);});
-const dashboard=path.join(ROOT,config.dashboardDirectory);app.use(express.static(dashboard));
-app.use((req,res)=>{const host=(req.hostname||"").toLowerCase().split(":")[0],suffix=`.${config.domain.toLowerCase()}`;if(!host.endsWith(suffix))return res.sendFile(path.join(dashboard,"index.html"));const sub=host.slice(0,-suffix.length);if(!sub||sub.includes("."))return res.sendFile(path.join(dashboard,"index.html"));const project=getProjectByName(sub);if(!project)return res.status(404).send("PlayOrg project not found");proxy.web(req,res,{target:`http://127.0.0.1:${project.port}`});});
-app.listen(config.serverPort,"0.0.0.0",()=>{console.log("=================================");console.log("        PLAYORG SERVER");console.log("=================================");console.log(`Domain:       ${config.domain}`);console.log(`Dashboard:    http://localhost:${config.serverPort}`);console.log(`Projects:     ${config.projectPortStart}-${config.projectPortEnd}`);console.log(`Admin auth:   ${dashboardToken?"enabled":"disabled"}`);console.log("Status:       ONLINE");console.log("=================================");});
-process.on("SIGINT",()=>process.exit(0));process.on("SIGTERM",()=>process.exit(0));
+
+const proxy=httpProxy.createProxyServer({changeOrigin:true});
+proxy.on("error",(err,req,res)=>{if(!res.headersSent)res.status(502).send(`PlayOrg proxy error: ${err.message}`);});
+const dashboard=path.join(ROOT,config.dashboardDirectory);
+app.use(express.static(dashboard));
+app.use((req,res)=>{
+  const host=(req.hostname||"").toLowerCase().split(":")[0];
+  const suffix=`.${config.domain.toLowerCase()}`;
+  if(!host.endsWith(suffix))return res.sendFile(path.join(dashboard,"index.html"));
+  const sub=host.slice(0,-suffix.length);
+  if(!sub||sub.includes("."))return res.sendFile(path.join(dashboard,"index.html"));
+  const project=getProjectByName(sub);
+  if(!project)return res.status(404).send("PlayOrg project not found");
+  proxy.web(req,res,{target:`http://127.0.0.1:${project.port}`});
+});
+
+app.listen(config.serverPort,"0.0.0.0",()=>{
+  console.log("=================================");
+  console.log("        PLAYORG SERVER");
+  console.log("=================================");
+  console.log(`Domain:       ${config.domain}`);
+  console.log(`Dashboard:    http://localhost:${config.serverPort}`);
+  console.log(`Projects:     ${config.projectPortStart}-${config.projectPortEnd}`);
+  console.log(`Admin auth:   ${dashboardToken?"enabled":"disabled"}`);
+  console.log("Status:       ONLINE");
+  console.log("=================================");
+});
+process.on("SIGINT",()=>process.exit(0));
+process.on("SIGTERM",()=>process.exit(0));
