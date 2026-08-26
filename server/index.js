@@ -35,16 +35,20 @@ function projectFromParam(value){
   return getProjectByName(String(value));
 }
 
+function publicProjectUrl(project){
+  return `http://${project.name}.${config.domain}`;
+}
+
 app.use("/api",express.json({limit:"2mb"}));
 app.get("/api/health",(req,res)=>res.json({status:"online",platform:"PlayOrg",domain:config.domain,serverPort:config.serverPort,projects:listProjects().length}));
-app.get("/api/projects",auth,(req,res)=>res.json({success:true,projects:listProjects().map(p=>({...p,running:isRunning(p.id)}))}));
+app.get("/api/projects",auth,(req,res)=>res.json({success:true,projects:listProjects().map(p=>({...p,running:isRunning(p.id),publicUrl:publicProjectUrl(p),dnsRecord:`${p.name}.${config.domain}`}))}));
 app.get("/api/projects/:id",auth,(req,res)=>{
   const p=projectFromParam(req.params.id);
   if(!p)return res.status(404).json({success:false,error:"Project not found"});
-  res.json({success:true,project:p,running:isRunning(p.id)});
+  res.json({success:true,project:{...p,publicUrl:publicProjectUrl(p),dnsRecord:`${p.name}.${config.domain}`},running:isRunning(p.id)});
 });
 app.post("/api/projects/deploy",auth,async(req,res)=>{
-  try{const project=await deployProject(req.body,config);res.status(201).json({success:true,project});}
+  try{const project=await deployProject(req.body,config);res.status(201).json({success:true,project:{...project,publicUrl:publicProjectUrl(project),dnsRecord:`${project.name}.${config.domain}`}});}
   catch(e){console.error(e);res.status(400).json({success:false,error:e.message});}
 });
 app.put("/api/projects/:id/settings",auth,(req,res)=>{
@@ -53,7 +57,7 @@ app.put("/api/projects/:id/settings",auth,(req,res)=>{
   try{
     const {branch,rootDirectory,buildCommand,startCommand,autoDeploy}=req.body||{};
     const updated=updateProject(p.id,{branch,rootDirectory,buildCommand,startCommand,autoDeploy});
-    res.json({success:true,project:updated});
+    res.json({success:true,project:{...updated,publicUrl:publicProjectUrl(updated),dnsRecord:`${updated.name}.${config.domain}`}});
   }catch(e){res.status(400).json({success:false,error:e.message});}
 });
 app.post("/api/projects/:id/restart",auth,(req,res)=>{
@@ -64,14 +68,14 @@ app.post("/api/projects/:id/restart",auth,(req,res)=>{
     env.PORT=String(p.port);env.NODE_ENV=env.NODE_ENV||"production";
     const pid=restartProject({...p,logPath:path.join(logsDir,`${p.name}.log`)},env);
     updateProject(p.id,{status:"running",processId:pid});
-    res.json({success:true,project:getProject(p.id)});
+    res.json({success:true,project:{...getProject(p.id),publicUrl:publicProjectUrl(p),dnsRecord:`${p.name}.${config.domain}`}});
   }catch(e){res.status(500).json({success:false,error:e.message});}
 });
 app.post("/api/projects/:id/stop",auth,(req,res)=>{
   const p=projectFromParam(req.params.id);
   if(!p)return res.status(404).json({error:"Project not found"});
   stopProject(p.id);updateProject(p.id,{status:"stopped",processId:null});
-  res.json({success:true,project:getProject(p.id)});
+  res.json({success:true,project:{...getProject(p.id),publicUrl:publicProjectUrl(p),dnsRecord:`${p.name}.${config.domain}`}});
 });
 app.delete("/api/projects/:id",auth,(req,res)=>{
   const p=projectFromParam(req.params.id);
@@ -108,17 +112,41 @@ app.get("/api/ports/next",auth,(req,res)=>res.json({port:nextPort(config.project
 
 const proxy=httpProxy.createProxyServer({changeOrigin:true});
 proxy.on("error",(err,req,res)=>{if(!res.headersSent)res.status(502).send(`PlayOrg proxy error: ${err.message}`);});
+
+function proxyProject(project,req,res){
+  proxy.web(req,res,{target:`http://127.0.0.1:${project.port}`,changeOrigin:true});
+}
+
 const dashboard=path.join(ROOT,config.dashboardDirectory);
 app.use(express.static(dashboard));
 app.use((req,res)=>{
   const host=(req.hostname||"").toLowerCase().split(":")[0];
   const suffix=`.${config.domain.toLowerCase()}`;
-  if(!host.endsWith(suffix))return res.sendFile(path.join(dashboard,"index.html"));
-  const sub=host.slice(0,-suffix.length);
-  if(!sub||sub.includes("."))return res.sendFile(path.join(dashboard,"index.html"));
-  const project=getProjectByName(sub);
-  if(!project)return res.status(404).send("PlayOrg project not found");
-  proxy.web(req,res,{target:`http://127.0.0.1:${project.port}`});
+
+  // Preferred mode: project-name.xyz.joe.dj
+  if(host.endsWith(suffix)){
+    const sub=host.slice(0,-suffix.length);
+    if(sub && !sub.includes(".")){
+      const project=getProjectByName(sub);
+      if(!project)return res.status(404).send("PlayOrg project not found");
+      return proxyProject(project,req,res);
+    }
+  }
+
+  // FreeDNS-friendly fallback: xyz.joe.dj/<project-name>/...
+  // This works without a paid wildcard DNS record.
+  const parts=req.path.split("/").filter(Boolean);
+  if(parts.length){
+    const project=getProjectByName(parts[0]);
+    if(project){
+      const originalUrl=req.url;
+      const prefix=`/${parts[0]}`;
+      req.url=originalUrl===prefix?"/":originalUrl.startsWith(prefix+"/")?originalUrl.slice(prefix.length)||"/":originalUrl;
+      return proxyProject(project,req,res);
+    }
+  }
+
+  return res.sendFile(path.join(dashboard,"index.html"));
 });
 
 app.listen(config.serverPort,"0.0.0.0",()=>{
@@ -129,6 +157,9 @@ app.listen(config.serverPort,"0.0.0.0",()=>{
   console.log(`Dashboard:    http://localhost:${config.serverPort}`);
   console.log(`Projects:     ${config.projectPortStart}-${config.projectPortEnd}`);
   console.log(`Admin auth:   ${dashboardToken?"enabled":"disabled"}`);
+  console.log("Public URLs:");
+  console.log(`  Subdomain:  http://PROJECT.${config.domain}`);
+  console.log(`  FreeDNS:    http://${config.domain}/PROJECT`);
   console.log("Status:       ONLINE");
   console.log("=================================");
 });
