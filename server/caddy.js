@@ -13,6 +13,11 @@ export function generateCaddyfile(root, domain, projects) {
   const lines = [
     "# Generated automatically by PlayOrg. Do not edit manually.",
     "# HTTPS is managed automatically by Caddy/Let's Encrypt.",
+    "",
+    `${domain} {`,
+    "    reverse_proxy 127.0.0.1:3000",
+    "    encode gzip",
+    "}",
     ""
   ];
 
