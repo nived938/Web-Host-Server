@@ -1,5 +1,6 @@
 {
   "domain": "xyz.joe.dj",
+  "publicProtocol": "https",
   "serverPort": 3000,
   "projectPortStart": 31000,
   "projectPortEnd": 31999,
